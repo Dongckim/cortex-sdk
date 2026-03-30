@@ -74,3 +74,42 @@ def test_ema_smoothing(roi: HybridROI, frame: np.ndarray) -> None:
     score2 = roi.fused_score_map(frame)
     # Second call should have EMA applied (scores may differ slightly)
     assert score2.shape == score1.shape
+
+
+def test_center_gate_reduces_edge_saliency() -> None:
+    """Ss_adjusted = Ss * Sc should reduce edge saliency vs raw Ss."""
+    from cortex.optimizer.saliency_roi import SaliencyROIStrategy
+    from cortex.optimizer.center_crop import CenterCropStrategy
+
+    img = np.zeros((200, 300, 3), dtype=np.uint8)
+    img[0:40, 0:40] = 255  # bright corner
+
+    saliency = SaliencyROIStrategy()
+    center = CenterCropStrategy()
+
+    ss = saliency.score_map(img)
+    sc = center.score_map(img)
+    ss_adjusted = ss * sc
+
+    # Corner saliency should be suppressed after gating
+    assert ss_adjusted[0, 0] <= ss[0, 0]
+
+
+def test_center_gate_preserves_center_saliency() -> None:
+    """Center saliency should be mostly preserved after gating."""
+    from cortex.optimizer.saliency_roi import SaliencyROIStrategy
+    from cortex.optimizer.center_crop import CenterCropStrategy
+
+    img = np.zeros((200, 300, 3), dtype=np.uint8)
+    img[70:130, 110:190] = 255  # bright center
+
+    saliency = SaliencyROIStrategy()
+    center = CenterCropStrategy()
+
+    ss = saliency.score_map(img)
+    sc = center.score_map(img)
+    ss_adjusted = ss * sc
+
+    cr, cc = ss.shape[0] // 2, ss.shape[1] // 2
+    # Center gating should keep most of center saliency (sc ~= 1.0 at center)
+    assert ss_adjusted[cr, cc] >= ss[cr, cc] * 0.8

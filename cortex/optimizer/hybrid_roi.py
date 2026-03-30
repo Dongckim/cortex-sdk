@@ -25,10 +25,10 @@ class RequestType(enum.Enum):
 
 _WEIGHTS: dict[RequestType, tuple[float, float, float]] = {
     # (center, text, saliency)
-    RequestType.TEXT_RECOGNITION: (0.2, 0.6, 0.2),
-    RequestType.OBJECT_SCENE: (0.2, 0.2, 0.6),
-    RequestType.NAVIGATION: (0.3, 0.1, 0.6),
-    RequestType.GENERAL: (0.4, 0.3, 0.3),
+    RequestType.TEXT_RECOGNITION: (0.1, 0.6, 0.3),
+    RequestType.OBJECT_SCENE: (0.1, 0.1, 0.8),
+    RequestType.NAVIGATION: (0.1, 0.1, 0.8),
+    RequestType.GENERAL: (0.2, 0.2, 0.6),
 }
 
 
@@ -48,7 +48,7 @@ class HybridROI:
     def __init__(
         self,
         request_type: RequestType = RequestType.GENERAL,
-        ema_alpha: float = 0.7,
+        ema_alpha: float = 0.85,
     ) -> None:
         self._center = CenterCropStrategy()
         self._text = TextROIStrategy()
@@ -105,7 +105,11 @@ class HybridROI:
         else:
             ss = self._saliency.score_map(frame, grid)
 
-        fused = wc * sc + wt * st + ws * ss
+        # Apply center weight as multiplicative gate on saliency
+        # This suppresses saliency far from center
+        ss_adjusted = ss * sc
+
+        fused = wc * sc + wt * st + ws * ss_adjusted
 
         # Normalize
         f_max = fused.max()
@@ -138,7 +142,7 @@ class HybridROI:
         cols, rows = grid
         cell_w, cell_h = w / cols, h / rows
 
-        threshold = score.mean()
+        threshold = score.mean() + 0.5 * (score.max() - score.mean())
         mask = score >= threshold
 
         coords = np.argwhere(mask)

@@ -20,7 +20,7 @@ class SceneChangeDetector:
             Lower values require more dramatic changes. Default is 0.85.
     """
 
-    def __init__(self, threshold: float = 0.85) -> None:
+    def __init__(self, threshold: float = 0.65) -> None:
         self._threshold = threshold
         self._last_accepted: np.ndarray | None = None
 
