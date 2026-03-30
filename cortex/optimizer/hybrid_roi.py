@@ -1,4 +1,11 @@
-"""Hybrid ROI combining center, text, and saliency strategies."""
+"""Hybrid ROI combining center, text, saliency, and motion strategies.
+
+Based on CORTEX paper Section III-B:
+  S = wc*Sc + wt*St + ws*Ss_adj + wm*Sm
+
+Where Ss_adj applies a soft center gate to saliency,
+and Sm captures frame-to-frame motion regions.
+"""
 
 import enum
 import logging
@@ -23,35 +30,38 @@ class RequestType(enum.Enum):
     GENERAL = "general"
 
 
+# Paper Section III-B: weights per request type
+# (center, text, saliency, motion)
 _WEIGHTS: dict[RequestType, tuple[float, float, float, float]] = {
-    # (center, text, saliency, motion)
-    RequestType.TEXT_RECOGNITION: (0.1, 0.5, 0.2, 0.2),
-    RequestType.OBJECT_SCENE: (0.1, 0.1, 0.5, 0.3),
-    RequestType.NAVIGATION: (0.1, 0.1, 0.4, 0.4),
-    RequestType.GENERAL: (0.2, 0.2, 0.3, 0.3),
+    RequestType.TEXT_RECOGNITION: (0.2, 0.6, 0.1, 0.1),
+    RequestType.OBJECT_SCENE: (0.2, 0.1, 0.5, 0.2),
+    RequestType.NAVIGATION: (0.2, 0.1, 0.3, 0.4),
+    RequestType.GENERAL: (0.3, 0.2, 0.3, 0.2),
 }
+
+# Minimum saliency after center gating (prevents total suppression)
+_CENTER_GATE_FLOOR = 0.3
 
 
 class HybridROI:
-    """Fuses center, text, and saliency score maps for ROI selection.
+    """Fuses center, text, saliency, and motion score maps for ROI.
 
-    Combines four strategies with weighted score map fusion:
-    S = wc*Sc + wt*St + ws*(Ss*Sc) + wm*Sm
+    Score map fusion (paper Section III-B):
+      Ss_adj = Ss * (floor + (1-floor) * Sc)   # soft center gate
+      Sm = frame_diff_grid                      # motion detection
+      S = wc*Sc + wt*St + ws*Ss_adj + wm*Sm
 
-    Saliency is gated by center weight (Ss*Sc), and motion map
-    highlights regions with frame-to-frame pixel changes.
-
-    Applies EMA temporal smoothing on the fused score map.
+    Applies EMA temporal smoothing to prevent ROI jitter.
 
     Args:
         request_type: Initial request type. Default is GENERAL.
-        ema_alpha: EMA smoothing factor. Default is 0.85.
+        ema_alpha: EMA smoothing factor (0-1). Default is 0.7.
     """
 
     def __init__(
         self,
         request_type: RequestType = RequestType.GENERAL,
-        ema_alpha: float = 0.85,
+        ema_alpha: float = 0.7,
     ) -> None:
         self._center = CenterCropStrategy()
         self._text = TextROIStrategy()
@@ -87,7 +97,7 @@ class HybridROI:
     def _motion_score_map(
         self, frame: np.ndarray, grid: tuple[int, int] = (8, 6)
     ) -> np.ndarray:
-        """Compute motion score map from frame-to-frame difference.
+        """Compute motion score map from frame-to-frame absdiff.
 
         Args:
             frame: Input image (BGR or grayscale).
@@ -109,6 +119,12 @@ class HybridROI:
 
         diff = cv2.absdiff(self._prev_gray, gray).astype(np.float32)
         self._prev_gray = gray.copy()
+
+        # Blur to reduce webcam noise sensitivity
+        diff = cv2.GaussianBlur(diff, (5, 5), 0)
+
+        # Threshold to ignore minor pixel noise (< 10/255)
+        diff[diff < 10] = 0
 
         h, w = diff.shape[:2]
         cell_h, cell_w = h / rows, w / cols
@@ -150,10 +166,12 @@ class HybridROI:
         else:
             ss = self._saliency.score_map(frame, grid)
 
-        # Center-gated saliency
-        ss_adjusted = ss * sc
+        # Soft center gate: preserves at least _CENTER_GATE_FLOOR
+        # of saliency even at edges (paper: prevents total suppression)
+        center_gate = _CENTER_GATE_FLOOR + (1 - _CENTER_GATE_FLOOR) * sc
+        ss_adjusted = ss * center_gate
 
-        # Motion score map from frame difference
+        # Motion score map
         sm = self._motion_score_map(frame, grid)
 
         fused = wc * sc + wt * st + ws * ss_adjusted + wm * sm
@@ -163,7 +181,7 @@ class HybridROI:
         if f_max > 0:
             fused /= f_max
 
-        # EMA temporal smoothing
+        # EMA temporal smoothing (paper: prevents ROI jitter)
         if self._prev_score is not None and self._prev_score.shape == fused.shape:
             fused = self._ema_alpha * fused + (1 - self._ema_alpha) * self._prev_score
 
@@ -173,7 +191,7 @@ class HybridROI:
     def crop(self, frame: np.ndarray) -> np.ndarray:
         """Crop the frame based on the fused score map.
 
-        Selects grid cells above the mean score and crops to their
+        Selects grid cells above a threshold and crops to their
         bounding box.
 
         Args:
@@ -199,15 +217,10 @@ class HybridROI:
         r_min, c_min = coords.min(axis=0)
         r_max, c_max = coords.max(axis=0)
 
-        y1 = int(r_min * cell_h)
-        y2 = int((r_max + 1) * cell_h)
-        x1 = int(c_min * cell_w)
-        x2 = int((c_max + 1) * cell_w)
-
-        y1 = max(0, y1)
-        x1 = max(0, x1)
-        y2 = min(h, y2)
-        x2 = min(w, x2)
+        y1 = max(0, int(r_min * cell_h))
+        y2 = min(h, int((r_max + 1) * cell_h))
+        x1 = max(0, int(c_min * cell_w))
+        x2 = min(w, int((c_max + 1) * cell_w))
 
         logger.debug("hybrid_crop region=(%d,%d,%d,%d)", x1, y1, x2, y2)
         return frame[y1:y2, x1:x2]
