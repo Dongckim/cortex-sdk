@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "cortex-sdk"
+version = "0.1.0"
+description = "Battery-aware VLM middleware SDK for wearable devices"
+license = "MIT"
+authors = [
+    { name = "Dongchan Kim", email = "dck.alx@gmail.com" },
+]
+requires-python = ">=3.11"
+dependencies = [
+    "opencv-python>=4.8",
+    "scikit-image>=0.21",
+    "numpy>=1.24",
+    "pillow>=10.0",
+    "httpx>=0.24",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=4.1",
+]
+
+[tool.setuptools.packages.find]
+include = ["cortex*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.black]
+line-length = 88
+target-version = ["py311"]
