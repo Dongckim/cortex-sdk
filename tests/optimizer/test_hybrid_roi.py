@@ -76,6 +76,36 @@ def test_ema_smoothing(roi: HybridROI, frame: np.ndarray) -> None:
     assert score2.shape == score1.shape
 
 
+def test_motion_map_first_frame_is_zero() -> None:
+    """First frame has no previous frame, motion should be zero."""
+    roi = HybridROI()
+    img = np.full((200, 300, 3), 128, dtype=np.uint8)
+    sm = roi._motion_score_map(img)
+    assert sm.shape == (6, 8)
+    assert sm.max() == 0.0
+
+
+def test_motion_map_detects_change() -> None:
+    """Moving object should produce nonzero motion map."""
+    roi = HybridROI()
+    img1 = np.zeros((200, 300, 3), dtype=np.uint8)
+    img2 = np.zeros((200, 300, 3), dtype=np.uint8)
+    img2[50:150, 100:200] = 255  # something appeared
+
+    roi._motion_score_map(img1)  # first frame
+    sm = roi._motion_score_map(img2)
+    assert sm.max() > 0
+
+
+def test_motion_map_static_is_zero() -> None:
+    """Identical frames should produce zero motion."""
+    roi = HybridROI()
+    img = np.full((200, 300, 3), 100, dtype=np.uint8)
+    roi._motion_score_map(img)
+    sm = roi._motion_score_map(img)
+    assert sm.max() == 0.0
+
+
 def test_center_gate_reduces_edge_saliency() -> None:
     """Ss_adjusted = Ss * Sc should reduce edge saliency vs raw Ss."""
     from cortex.optimizer.saliency_roi import SaliencyROIStrategy

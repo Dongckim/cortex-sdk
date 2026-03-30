@@ -23,26 +23,29 @@ class RequestType(enum.Enum):
     GENERAL = "general"
 
 
-_WEIGHTS: dict[RequestType, tuple[float, float, float]] = {
-    # (center, text, saliency)
-    RequestType.TEXT_RECOGNITION: (0.1, 0.6, 0.3),
-    RequestType.OBJECT_SCENE: (0.1, 0.1, 0.8),
-    RequestType.NAVIGATION: (0.1, 0.1, 0.8),
-    RequestType.GENERAL: (0.2, 0.2, 0.6),
+_WEIGHTS: dict[RequestType, tuple[float, float, float, float]] = {
+    # (center, text, saliency, motion)
+    RequestType.TEXT_RECOGNITION: (0.1, 0.5, 0.2, 0.2),
+    RequestType.OBJECT_SCENE: (0.1, 0.1, 0.5, 0.3),
+    RequestType.NAVIGATION: (0.1, 0.1, 0.4, 0.4),
+    RequestType.GENERAL: (0.2, 0.2, 0.3, 0.3),
 }
 
 
 class HybridROI:
     """Fuses center, text, and saliency score maps for ROI selection.
 
-    Combines three strategies with weighted score map fusion:
-    S = wc*Sc + wt*St + ws*Ss
+    Combines four strategies with weighted score map fusion:
+    S = wc*Sc + wt*St + ws*(Ss*Sc) + wm*Sm
+
+    Saliency is gated by center weight (Ss*Sc), and motion map
+    highlights regions with frame-to-frame pixel changes.
 
     Applies EMA temporal smoothing on the fused score map.
 
     Args:
         request_type: Initial request type. Default is GENERAL.
-        ema_alpha: EMA smoothing factor. Default is 0.7.
+        ema_alpha: EMA smoothing factor. Default is 0.85.
     """
 
     def __init__(
@@ -56,6 +59,7 @@ class HybridROI:
         self._request_type = request_type
         self._ema_alpha = ema_alpha
         self._prev_score: np.ndarray | None = None
+        self._prev_gray: np.ndarray | None = None
         self._battery_mode = BatteryMode.BALANCED
 
     @property
@@ -80,6 +84,48 @@ class HybridROI:
         """
         self._battery_mode = mode
 
+    def _motion_score_map(
+        self, frame: np.ndarray, grid: tuple[int, int] = (8, 6)
+    ) -> np.ndarray:
+        """Compute motion score map from frame-to-frame difference.
+
+        Args:
+            frame: Input image (BGR or grayscale).
+            grid: Grid size (columns, rows).
+
+        Returns:
+            Motion score map of shape (rows, cols) with values 0.0-1.0.
+        """
+        if len(frame.shape) == 3:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = frame
+
+        cols, rows = grid
+
+        if self._prev_gray is None:
+            self._prev_gray = gray.copy()
+            return np.zeros((rows, cols), dtype=np.float32)
+
+        diff = cv2.absdiff(self._prev_gray, gray).astype(np.float32)
+        self._prev_gray = gray.copy()
+
+        h, w = diff.shape[:2]
+        cell_h, cell_w = h / rows, w / cols
+
+        score = np.zeros((rows, cols), dtype=np.float32)
+        for r in range(rows):
+            for c in range(cols):
+                y1, y2 = int(r * cell_h), int((r + 1) * cell_h)
+                x1, x2 = int(c * cell_w), int((c + 1) * cell_w)
+                score[r, c] = diff[y1:y2, x1:x2].mean()
+
+        s_max = score.max()
+        if s_max > 0:
+            score /= s_max
+
+        return score
+
     def fused_score_map(
         self, frame: np.ndarray, grid: tuple[int, int] = (8, 6)
     ) -> np.ndarray:
@@ -92,24 +138,25 @@ class HybridROI:
         Returns:
             Fused score map of shape (rows, cols).
         """
-        wc, wt, ws = _WEIGHTS[self._request_type]
+        wc, wt, ws, wm = _WEIGHTS[self._request_type]
 
         sc = self._center.score_map(frame, grid)
         st = self._text.score_map(frame, grid)
 
         if self._battery_mode == BatteryMode.POWER_SAVE:
             ss = np.zeros_like(sc)
-            # Redistribute saliency weight to center
             wc += ws
             ws = 0.0
         else:
             ss = self._saliency.score_map(frame, grid)
 
-        # Apply center weight as multiplicative gate on saliency
-        # This suppresses saliency far from center
+        # Center-gated saliency
         ss_adjusted = ss * sc
 
-        fused = wc * sc + wt * st + ws * ss_adjusted
+        # Motion score map from frame difference
+        sm = self._motion_score_map(frame, grid)
+
+        fused = wc * sc + wt * st + ws * ss_adjusted + wm * sm
 
         # Normalize
         f_max = fused.max()
@@ -142,7 +189,7 @@ class HybridROI:
         cols, rows = grid
         cell_w, cell_h = w / cols, h / rows
 
-        threshold = score.mean() + 0.5 * (score.max() - score.mean())
+        threshold = score.mean() + 0.15 * (score.max() - score.mean())
         mask = score >= threshold
 
         coords = np.argwhere(mask)

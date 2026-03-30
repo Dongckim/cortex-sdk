@@ -23,6 +23,7 @@ class SceneChangeDetector:
     def __init__(self, threshold: float = 0.65) -> None:
         self._threshold = threshold
         self._last_accepted: np.ndarray | None = None
+        self._last_score: float | None = None
 
     @property
     def threshold(self) -> float:
@@ -53,6 +54,7 @@ class SceneChangeDetector:
             return True
 
         score = ssim(self._last_accepted, gray)
+        self._last_score = float(score)
         changed = bool(score < self._threshold)
 
         logger.debug(
@@ -74,4 +76,4 @@ class SceneChangeDetector:
     @property
     def last_score(self) -> float | None:
         """Return the last computed SSIM score, or None if no comparison yet."""
-        return None
+        return self._last_score

@@ -118,9 +118,12 @@ class CaptureEngine:
         motion_score = self._imu.motion_score
         battery_mode = self._imu.mode.value
 
+        ssim_score = self._scene.last_score
+
         base_stats = {
             "blur_score": blur_score,
             "motion_score": motion_score,
+            "ssim_score": ssim_score,
             "battery_mode": battery_mode,
         }
 

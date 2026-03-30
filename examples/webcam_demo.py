@@ -5,6 +5,7 @@ Pipeline: blur filter → scene change → ROI crop → adaptive encode.
 Controls:
     1 / 2 / 3  — AGGRESSIVE / BALANCED / POWER_SAVE
     t / o / g  — TEXT / OBJECT / GENERAL ROI mode
+    h          — toggle heatmap overlay
     r          — reset stats
     q          — quit
 """
@@ -43,7 +44,6 @@ while True:
 
     if result.accepted:
         last_accepted = frame.copy()
-        # L2: ROI crop + encode
         last_score_map = roi.fused_score_map(frame)
         last_cropped = roi.crop(frame)
         encoded = encoder.encode(last_cropped, NetworkCondition.WIFI)
@@ -56,15 +56,17 @@ while True:
     display = frame.copy()
     h, w = display.shape[:2]
 
-    # Score map heatmap overlay
+    # 1. Heatmap overlay (alpha=0.15 for subtlety)
     if show_heatmap and last_score_map is not None:
         heatmap = cv2.resize(last_score_map, (w, h), interpolation=cv2.INTER_NEAREST)
-        heatmap_color = cv2.applyColorMap((heatmap * 255).astype(np.uint8), cv2.COLORMAP_JET)
-        cv2.addWeighted(heatmap_color, 0.3, display, 0.7, 0, display)
+        heatmap_color = cv2.applyColorMap(
+            (heatmap * 255).astype(np.uint8), cv2.COLORMAP_JET
+        )
+        cv2.addWeighted(heatmap_color, 0.15, display, 0.85, 0, display)
 
     # Top bar
     overlay = display.copy()
-    cv2.rectangle(overlay, (0, 0), (w, 72), (0, 0, 0), -1)
+    cv2.rectangle(overlay, (0, 0), (w, 82), (0, 0, 0), -1)
     cv2.addWeighted(overlay, 0.7, display, 0.3, 0, display)
 
     # Status
@@ -80,26 +82,33 @@ while True:
         (36, 21), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1,
     )
 
-    # L1 stats
+    # 4. L1 stats — blur score + SSIM score (realtime)
     stats = engine.stats
     rate = stats["acceptance_rate"] * 100
+    blur_val = result.stats.get("blur_score", 0)
+    ssim_val = result.stats.get("ssim_score")
+    ssim_str = f"{ssim_val:.3f}" if ssim_val is not None else "—"
     l1_info = (
-        f"blur {result.stats.get('blur_score', 0):.0f}  |  "
-        f"accept {rate:.0f}% ({stats['accepted_frames']}/{stats['total_frames']})"
+        f"blur {blur_val:.0f} (thr:{engine._blur.threshold:.0f})  |  "
+        f"ssim {ssim_str} (thr:{engine._scene.threshold:.2f})  |  "
+        f"accept {rate:.1f}%"
     )
     cv2.putText(
         display, l1_info,
         (20, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (160, 160, 160), 1,
     )
 
-    # L2 stats
+    # 2. L2 stats — precise compression ratio
     if last_accepted is not None:
         orig_kb = frame.nbytes / 1024
         enc_kb = last_encoded_size / 1024
-        reduction = (1 - last_encoded_size / frame.nbytes) * 100 if frame.nbytes > 0 else 0
+        reduction = (
+            (1 - last_encoded_size / frame.nbytes) * 100
+            if frame.nbytes > 0 else 0
+        )
         l2_info = (
             f"roi {roi.request_type.value}  |  "
-            f"{orig_kb:.0f}KB -> {enc_kb:.1f}KB ({reduction:.0f}% reduced)  |  "
+            f"{orig_kb:.0f}KB -> {enc_kb:.1f}KB ({reduction:.1f}% reduced)  |  "
             f"~{last_tokens} tok  ${last_cost:.4f}"
         )
         cv2.putText(
@@ -107,22 +116,31 @@ while True:
             (20, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (120, 200, 160), 1,
         )
 
-    # Cropped ROI thumbnail (bottom-right)
+    # Controls hint
+    cv2.putText(
+        display,
+        "1/2/3:battery  t/o/g:roi  h:heatmap  r:reset  q:quit",
+        (20, 78), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (100, 100, 100), 1,
+    )
+
+    # 3. ROI crop preview — 1/3 size, right side
     if last_cropped is not None:
-        tw, th = w // 5, h // 5
+        tw, th = w // 3, h // 3
         small = cv2.resize(last_cropped, (tw, th))
-        y1, x1 = h - th - 10, w - tw - 10
+        y1 = h - th - 10
+        x1 = w - tw - 10
+        # Background
         overlay2 = display.copy()
         cv2.rectangle(
-            overlay2, (x1 - 1, y1 - 16), (x1 + tw + 1, y1 + th + 1),
+            overlay2, (x1 - 1, y1 - 18), (x1 + tw + 1, y1 + th + 1),
             (0, 0, 0), -1,
         )
         cv2.addWeighted(overlay2, 0.5, display, 0.5, 0, display)
         display[y1:y1 + th, x1:x1 + tw] = small
         cv2.putText(
             display, "roi crop",
-            (x1 + 2, y1 - 4),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.35, (160, 160, 160), 1,
+            (x1 + 2, y1 - 5),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (160, 160, 160), 1,
         )
 
     cv2.imshow("CORTEX L1+L2 Demo", display)
