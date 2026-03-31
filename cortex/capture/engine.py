@@ -19,9 +19,9 @@ _BLUR_THRESHOLDS: dict[BatteryMode, float] = {
 }
 
 _SCENE_THRESHOLDS: dict[BatteryMode, float] = {
-    BatteryMode.AGGRESSIVE: 0.80,
-    BatteryMode.BALANCED: 0.65,
-    BatteryMode.POWER_SAVE: 0.50,
+    BatteryMode.AGGRESSIVE: 0.90,
+    BatteryMode.BALANCED: 0.80,
+    BatteryMode.POWER_SAVE: 0.65,
 }
 
 

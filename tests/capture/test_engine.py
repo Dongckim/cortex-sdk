@@ -85,11 +85,11 @@ def test_imu_skipped_when_no_data(
 def test_battery_mode_switching(engine: CaptureEngine) -> None:
     engine.set_battery_mode(BatteryMode.POWER_SAVE)
     assert engine._blur.threshold == 50.0
-    assert engine._scene.threshold == 0.50
+    assert engine._scene.threshold == 0.65
 
     engine.set_battery_mode(BatteryMode.AGGRESSIVE)
     assert engine._blur.threshold == 150.0
-    assert engine._scene.threshold == 0.80
+    assert engine._scene.threshold == 0.90
 
 
 def test_stats_tracking(

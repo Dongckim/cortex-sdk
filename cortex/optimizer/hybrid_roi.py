@@ -207,7 +207,9 @@ class HybridROI:
         cols, rows = grid
         cell_w, cell_h = w / cols, h / rows
 
-        threshold = score.mean() + 0.15 * (score.max() - score.mean())
+        # Keep cells in the top 40% of the score range
+        s_min, s_max = score.min(), score.max()
+        threshold = s_min + 0.6 * (s_max - s_min)
         mask = score >= threshold
 
         coords = np.argwhere(mask)
