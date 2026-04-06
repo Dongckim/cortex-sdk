@@ -77,3 +77,28 @@ def test_bgr_input(detector: SceneChangeDetector) -> None:
     bgr = np.zeros((200, 200, 3), dtype=np.uint8)
     bgr[50:150, 50:150] = [255, 0, 0]
     assert detector.detect(bgr) is True
+
+
+def test_cooldown_blocks_during_window(
+    frame_a: np.ndarray, frame_b: np.ndarray
+) -> None:
+    """During the cooldown window, even a very different frame is rejected."""
+    detector = SceneChangeDetector(threshold=0.85, cooldown_s=60.0)
+    assert detector.detect(frame_a) is True       # first frame always passes
+    # frame_b is very different but cooldown hasn't expired
+    assert detector.detect(frame_b) is False
+
+
+def test_cooldown_zero_behaves_normally(
+    frame_a: np.ndarray, frame_b: np.ndarray
+) -> None:
+    """cooldown_s=0 should not block anything — same as default behaviour."""
+    detector = SceneChangeDetector(threshold=0.85, cooldown_s=0.0)
+    detector.detect(frame_a)
+    assert detector.detect(frame_b) is True
+
+
+def test_cooldown_setter(detector: SceneChangeDetector) -> None:
+    assert detector.cooldown_s == 0.0
+    detector.cooldown_s = 5.0
+    assert detector.cooldown_s == 5.0
