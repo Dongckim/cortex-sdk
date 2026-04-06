@@ -307,8 +307,9 @@ def main():
     active_ms  = 0.0
     synth      = np.zeros((480, 640, 3), dtype=np.uint8)
 
+    # macOS fullscreen blocks keyboard input — use resizable window instead
     cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
-    cv2.setWindowProperty(WIN, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    cv2.resizeWindow(WIN, 1280, 780)
 
     while True:
         # ── grab frame ───────────────────────────────────────────────
@@ -369,6 +370,21 @@ def main():
              f"stress={stress}x  |  {active_ms:.1f}ms/frame",
              (fw - 300, 19), scale=0.38, color=ms_c)
 
+        # ── stress overlay — big centred text ────────────────────────
+        # Draw stress number large so user can see it change immediately
+        stress_str = f"x{stress}"
+        ms_c2 = C_GREEN if active_ms < 10 else (C_ORANGE if active_ms < 40 else C_RED)
+        # shadow
+        cv2.putText(cam_img, stress_str,
+                    (fw // 2 - 80, fh // 2 + 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 3.0, (0, 0, 0), 8, cv2.LINE_AA)
+        # foreground
+        cv2.putText(cam_img, stress_str,
+                    (fw // 2 - 80, fh // 2 + 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 3.0, ms_c2, 4, cv2.LINE_AA)
+        _txt(cam_img, "STRESS  [UP] more  [DOWN] less",
+             (fw // 2 - 120, fh // 2 + 65), scale=0.45, color=C_DIM)
+
         canvas[:fh, :fw] = cam_img
         cv2.line(canvas, (fw, 0), (fw, fh), C_BORDER, 1)
 
@@ -384,14 +400,15 @@ def main():
 
         cv2.imshow(WIN, canvas)
 
-        key = cv2.waitKey(1) & 0xFF
+        raw_key = cv2.waitKey(1)
+        key = raw_key & 0xFF
         if   key == ord("q"):  break
         elif key == ord("1"):  active_idx = 0
         elif key == ord("2"):  active_idx = 1
         elif key == ord("3"):  active_idx = 2
-        elif key in (ord("+"), ord("=")):
+        elif key in (ord("+"), ord("="), 82):   # 82 = UP arrow
             stress = min(stress + 25, 1000)
-        elif key == ord("-"):
+        elif key in (ord("-"), 84):             # 84 = DOWN arrow
             stress = max(stress - 25, 1)
 
     for t in timers:
