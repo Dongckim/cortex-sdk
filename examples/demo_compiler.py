@@ -34,6 +34,7 @@ from cortex.compiler import (
     saliency_vectorized,
     warmup_jit,
 )
+from cortex.compiler.saliency_kernel import _NUMBA_AVAILABLE
 
 # ── palette ──────────────────────────────────────────────────────────
 C_BG     = (18,  18,  18)
@@ -280,9 +281,12 @@ def draw_bottom(strip, timers, active_idx, stress):
 # ── main ──────────────────────────────────────────────────────────────
 
 def main():
-    print("Warming up JIT kernel (one-time LLVM compile)...", end=" ", flush=True)
-    warmup_jit()
-    print("done")
+    if _NUMBA_AVAILABLE:
+        print("Warming up JIT kernel (one-time LLVM compile)...", end=" ", flush=True)
+        warmup_jit()
+        print("done")
+    else:
+        print("numba not available — JIT kernel falls back to vectorized")
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():

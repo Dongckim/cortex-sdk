@@ -311,6 +311,9 @@ def warmup_jit(grid: tuple[int, int] = (8, 6)) -> None:
 
     Call once at startup so benchmark timings exclude first-call LLVM compile
     cost, analogous to TVM's ahead-of-time (AOT) compilation step.
+    No-op when numba is not available.
     """
+    if not _NUMBA_AVAILABLE:
+        return
     dummy = np.zeros((64, 64), dtype=np.float32)
     _grid_pool_jit(dummy, grid[1], grid[0])
