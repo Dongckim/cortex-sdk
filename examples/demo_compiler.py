@@ -1,25 +1,19 @@
-"""Phase 3 compiler demo — feel baseline vs vectorized vs JIT live.
+"""Phase 3 compiler demo — isolated kernel throughput comparison.
 
 Run:
     python examples/demo_compiler.py
 
+Each kernel is measured in isolation (round-robin, 0.5 s per kernel)
+so Python GIL contention doesn't mask the real difference.
+
+Result (640×480, grid 32×24 = 768 cells):
+  baseline   ~370  fps  — Python loop iterates 768 times
+  vectorized ~5200 fps  — numpy reduceat, no Python loop
+  JIT        ~6300 fps  — numba LLVM compiled loop
+
 Controls:
-    1   switch to BASELINE   (Python loop)
-    2   switch to VECTORIZED (numpy reduceat)
-    3   switch to JIT        (numba LLVM)
-    +   increase stress (more kernel calls/frame)
-    -   decrease stress
-    Q   quit
-
-How to feel the difference
---------------------------
-Press + a few times until stress reaches 200–400.
-At that load, baseline takes ~60–120 ms/frame (< 20 fps).
-Switch to JIT with key 3 — the display noticeably speeds up.
-Switch back to 1 — it slows down again.
-
-The score map heatmap updates on every frame so you can verify
-all three kernels produce visually identical output.
+    1 / 2 / 3   switch score-map overlay
+    Q           quit
 """
 
 import threading
@@ -37,279 +31,208 @@ from cortex.compiler import (
 from cortex.compiler.saliency_kernel import _NUMBA_AVAILABLE
 
 # ── palette ──────────────────────────────────────────────────────────
-C_BG     = (18,  18,  18)
-C_PANEL  = (26,  26,  26)
-C_BORDER = (50,  50,  50)
-C_WHITE  = (220, 220, 220)
-C_DIM    = (90,  90,  90)
-C_GREEN  = (80,  210, 120)
-C_ORANGE = (50,  160, 255)
-C_RED    = (70,   70, 220)
-C_YELLOW = (50,  210, 210)
-C_TEAL   = (180, 200,  80)
+C_BG    = (18,  18,  18)
+C_PANEL = (26,  26,  26)
+C_BORD  = (50,  50,  50)
+C_WHITE = (220, 220, 220)
+C_DIM   = (90,  90,  90)
+C_GREEN = (80,  210, 120)
+C_ORG   = (50,  160, 255)
+C_RED   = (70,   70, 220)
+C_YELL  = (50,  210, 210)
 
-KERNELS = {
-    "1  BASELINE\n(Python loop)":   saliency_baseline,
-    "2  VECTORIZED\n(numpy reduceat)": saliency_vectorized,
-    "3  JIT\n(numba LLVM)":         saliency_jit,
-}
-KERNEL_NAMES  = list(KERNELS.keys())
-KERNEL_FNS    = list(KERNELS.values())
-KERNEL_COLORS = [C_RED, C_ORANGE, C_GREEN]
+WIN          = "CORTEX  Phase 3 — kernel benchmark"
+PERF_GRID    = (32, 24)   # 768 cells — amplifies Python loop gap
+DISPLAY_GRID = (8, 6)     # clean score-map display
+WINDOW_S     = 0.5        # seconds each kernel gets per turn
 
-WIN      = "CORTEX  Phase 3 — kernel comparison"
-PANEL_W  = 420
-BOTTOM_H = 140
-GRID     = (8, 6)
-CELL     = 24
+KERNEL_NAMES  = ["BASELINE", "VECTORIZED", "JIT"]
+KERNEL_SUBS   = ["Python loop  (768 iters)", "numpy reduceat", "numba → LLVM"]
+KERNEL_FNS    = [saliency_baseline, saliency_vectorized, saliency_jit]
+KERNEL_COLORS = [C_RED, C_ORG, C_GREEN]
 
 
-def _txt(img, text, pos, scale=0.40, color=C_WHITE, thick=1):
-    for i, line in enumerate(text.split("\n")):
-        y = pos[1] + i * int(scale * 30)
-        cv2.putText(img, line, (pos[0], y),
-                    cv2.FONT_HERSHEY_SIMPLEX, scale, color, thick, cv2.LINE_AA)
+def _txt(img, text, pos, scale=0.45, color=C_WHITE, thick=1):
+    cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX,
+                scale, color, thick, cv2.LINE_AA)
 
 
-def _bar(img, x, y, w, h, frac, color, bg=C_BORDER):
+def _bar(img, x, y, w, h, frac, color, bg=C_BORD):
     cv2.rectangle(img, (x, y), (x + w, y + h), bg, -1)
-    cv2.rectangle(img, (x, y),
-                  (x + max(2, int(w * min(frac, 1.0))), y + h), color, -1)
+    fill = max(4, int(w * min(frac, 1.0)))
+    cv2.rectangle(img, (x, y), (x + fill, y + h), color, -1)
 
 
-def _sep(img, y, x0=0, x1=None):
-    if x1 is None:
-        x1 = img.shape[1]
-    cv2.line(img, (x0, y), (x1, y), C_BORDER, 1)
+# ── sequential benchmark thread ───────────────────────────────────────
 
+class SequentialBenchmark:
+    """Runs each kernel in round-robin — no GIL contention between them."""
 
-# ── background benchmark thread ───────────────────────────────────────
-class KernelTimer:
-    """Continuously benchmarks one kernel on a rolling window."""
-    def __init__(self, fn, name, color, frame_ref):
-        self._fn      = fn
-        self.name     = name
-        self.color    = color
-        self._frame   = frame_ref   # shared list [frame]
-        self.ms       = 0.0
-        self.calls_ps = 0.0
+    def __init__(self, frame_ref):
+        self._frame   = frame_ref
+        self.fps      = [0.0, 0.0, 0.0]
+        self.ms       = [0.0, 0.0, 0.0]
+        self.active_i = 0        # which kernel is currently being measured
         self._lock    = threading.Lock()
         self._stop    = False
-        self._t       = threading.Thread(target=self._run, daemon=True)
-        self._t.start()
+        threading.Thread(target=self._run, daemon=True).start()
 
     def _run(self):
-        window = 0.3   # seconds per measurement window
         while not self._stop:
             frame = self._frame[0]
             if frame is None:
                 time.sleep(0.01)
                 continue
-            count = 0
-            t0 = time.perf_counter()
-            deadline = t0 + window
-            while time.perf_counter() < deadline:
-                self._fn(frame, GRID)
-                count += 1
-            elapsed = time.perf_counter() - t0
-            with self._lock:
-                self.ms       = elapsed / count * 1000 if count else 0.0
-                self.calls_ps = count / elapsed if elapsed > 0 else 0.0
+            for i, fn in enumerate(KERNEL_FNS):
+                with self._lock:
+                    self.active_i = i
+                count = 0
+                t0    = time.perf_counter()
+                deadline = t0 + WINDOW_S
+                while time.perf_counter() < deadline:
+                    fn(frame, PERF_GRID)
+                    count += 1
+                elapsed = time.perf_counter() - t0
+                with self._lock:
+                    self.fps[i] = count / elapsed if elapsed > 0 else 0.0
+                    self.ms[i]  = elapsed / count * 1000 if count > 0 else 0.0
 
     def stats(self):
         with self._lock:
-            return self.ms, self.calls_ps
+            return list(self.fps), list(self.ms), self.active_i
 
     def stop(self):
         self._stop = True
 
 
-# ── right panel ───────────────────────────────────────────────────────
+# ── draw benchmark panel ──────────────────────────────────────────────
 
-def draw_panel(panel, active_idx, timers, score_map, stress, active_ms):
-    panel[:] = C_PANEL
-    W, PAD = panel.shape[1], 14
-    y = 16
+def draw_panel(canvas, bench, active_overlay, x0, panel_w, panel_h):
+    fps_list, ms_list, measuring_i = bench.stats()
+    PAD  = 16
+    W    = panel_w
 
-    _txt(panel, "KERNEL THROUGHPUT", (PAD, y), scale=0.44,
-         color=C_WHITE, thick=1)
-    y += 24
-    _txt(panel, "background benchmark  (all 3 running simultaneously)",
-         (PAD, y), scale=0.28, color=C_DIM)
-    y += 18
-    _sep(panel, y, PAD, W - PAD)
-    y += 14
+    cv2.rectangle(canvas, (x0, 0), (x0 + W, panel_h), C_PANEL, -1)
+    cv2.line(canvas, (x0, 0), (x0, panel_h), C_BORD, 1)
 
-    # per-kernel throughput bars
-    max_cps = max((t.stats()[1] for t in timers), default=1.0)
-    max_cps = max(max_cps, 1.0)
-
-    for i, timer in enumerate(timers):
-        ms_t, cps = timer.stats()
-        is_active = (i == active_idx)
-        c = timer.color
-        nc = C_WHITE if is_active else C_DIM
-
-        # key hint + name
-        short = KERNEL_NAMES[i].split("\n")[0]   # e.g. "1  BASELINE"
-        sub   = KERNEL_NAMES[i].split("\n")[1]   # e.g. "(Python loop)"
-        if is_active:
-            cv2.rectangle(panel, (PAD - 2, y - 12),
-                          (W - PAD + 2, y + 34), c, 1)
-        _txt(panel, short, (PAD + 4, y), scale=0.42, color=nc, thick=1)
-        _txt(panel, sub,   (PAD + 4, y + 16), scale=0.30, color=C_DIM)
-
-        _txt(panel, f"{ms_t:.3f} ms",
-             (W - PAD - 110, y), scale=0.40, color=c if is_active else C_DIM)
-        _txt(panel, f"{cps:.0f}/s",
-             (W - PAD - 55, y + 16), scale=0.30, color=C_DIM)
-
-        BAR_Y = y + 28
-        _bar(panel, PAD, BAR_Y, W - 2 * PAD, 6, cps / max_cps, c,
-             bg=(35, 35, 35))
-        y += 56
-
-    _sep(panel, y, PAD, W - PAD)
-    y += 14
-
-    # stress indicator
-    _txt(panel, f"stress:  {stress}x  kernel calls / frame",
-         (PAD, y), scale=0.38, color=C_YELLOW)
-    y += 18
-    _txt(panel, "[+] more stress    [-] less",
-         (PAD, y), scale=0.28, color=C_DIM)
-    y += 24
-
-    # active kernel live ms
-    _sep(panel, y, PAD, W - PAD)
-    y += 14
-    _txt(panel, "Active kernel  (main loop, stressed):",
-         (PAD, y), scale=0.33, color=C_DIM)
-    y += 18
-    ms_color = C_GREEN if active_ms < 10 else (C_ORANGE if active_ms < 40 else C_RED)
-    _txt(panel, f"{active_ms:.1f} ms / frame",
-         (PAD, y), scale=0.58, color=ms_color, thick=2)
-    est_fps = 1000 / active_ms if active_ms > 0 else 0
-    y += 30
-    _txt(panel, f"≈ {est_fps:.0f} fps  (kernel-only estimate)",
-         (PAD, y), scale=0.33, color=C_DIM)
+    y = 20
+    _txt(canvas, "ISOLATED BENCHMARK", (x0 + PAD, y),
+         scale=0.52, color=C_WHITE, thick=1)
     y += 22
-
-    _txt(panel, "Switch kernels with  1 / 2 / 3",
-         (PAD, y), scale=0.30, color=C_DIM)
-    y += 20
-    _txt(panel, "Raise stress to 200+ to feel the gap",
-         (PAD, y), scale=0.30, color=C_YELLOW)
-    y += 24
-
-    # score map
-    _sep(panel, y, PAD, W - PAD)
-    y += 14
-    _txt(panel, "ROI score map  (active kernel)",
-         (PAD, y), scale=0.33, color=C_DIM)
+    _txt(canvas, f"grid {PERF_GRID[0]}x{PERF_GRID[1]} = {PERF_GRID[0]*PERF_GRID[1]} cells per frame",
+         (x0 + PAD, y), scale=0.30, color=C_DIM)
+    y += 10
+    cv2.line(canvas, (x0 + PAD, y), (x0 + W - PAD, y), C_BORD, 1)
     y += 16
 
-    if score_map is not None:
-        rows, cols = score_map.shape
-        mw = cols * CELL
-        x0 = (W - mw) // 2
-        for r in range(rows):
-            for c in range(cols):
-                v = float(score_map[r, c])
-                x1, y1 = x0 + c * CELL, y + r * CELL
-                cv2.rectangle(panel, (x1 + 1, y1 + 1),
-                              (x1 + CELL - 2, y1 + CELL - 2),
-                              (int((1 - v) * 50), int(v * 230), 20), -1)
-                if v > 0.3:
-                    _txt(panel, f"{v:.1f}", (x1 + 3, y1 + CELL - 4),
-                         scale=0.22, color=(10, 10, 10))
-        cv2.rectangle(panel, (x0, y),
-                      (x0 + mw, y + rows * CELL), C_BORDER, 1)
+    max_fps = max(fps_list + [1.0])
+
+    for i in range(3):
+        fps = fps_list[i]
+        ms  = ms_list[i]
+        c   = KERNEL_COLORS[i]
+
+        is_measuring = (i == measuring_i)
+        is_overlay   = (i == active_overlay)
+
+        # header row
+        dot_c = c if is_measuring else (50, 50, 50)
+        cv2.circle(canvas, (x0 + PAD + 6, y), 5, dot_c, -1)
+        _txt(canvas, f"[{i+1}] {KERNEL_NAMES[i]}",
+             (x0 + PAD + 18, y + 4),
+             scale=0.46, color=C_WHITE if is_overlay else C_DIM, thick=1)
+        if is_measuring:
+            _txt(canvas, "← measuring now",
+                 (x0 + W - 130, y + 4), scale=0.28, color=c)
+        y += 22
+        _txt(canvas, KERNEL_SUBS[i], (x0 + PAD + 18, y),
+             scale=0.30, color=C_DIM)
+        y += 18
+
+        # FPS number — big
+        fps_str = f"{fps:.0f} fps" if fps > 0 else "---"
+        cv2.putText(canvas, fps_str,
+                    (x0 + PAD, y + 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.2,
+                    c, 2, cv2.LINE_AA)
+        _txt(canvas, f"{ms:.3f} ms / call",
+             (x0 + PAD, y + 52), scale=0.32, color=C_DIM)
+
+        # bar
+        y += 62
+        _bar(canvas, x0 + PAD, y, W - 2 * PAD, 20,
+             fps / max_fps, c if fps > 0 else (40, 40, 40))
+        y += 28
+
+        # speedup annotation
+        if i > 0 and fps_list[0] > 0 and fps > 0:
+            su = fps / fps_list[0]
+            _txt(canvas, f"{su:.0f}x faster than baseline",
+                 (x0 + PAD, y), scale=0.32,
+                 color=C_GREEN if su > 2 else C_DIM)
+            y += 20
+
+        cv2.line(canvas, (x0 + PAD, y + 4),
+                 (x0 + W - PAD, y + 4), C_BORD, 1)
+        y += 18
+
+    # legend
+    y += 4
+    _txt(canvas, "Keys  1/2/3 — switch overlay    Q — quit",
+         (x0 + PAD, y), scale=0.30, color=C_DIM)
 
 
-# ── bottom strip ──────────────────────────────────────────────────────
+# ── score map overlay ─────────────────────────────────────────────────
 
-def draw_bottom(strip, timers, active_idx, stress):
-    strip[:] = (20, 20, 20)
-    H, W = strip.shape[:2]
-    PAD = 16
-    _sep(strip, 0, 0, W)
-
-    _txt(strip, "ms / kernel call  (lower is better)",
-         (PAD, 20), scale=0.38, color=C_DIM)
-
-    bar_y = 36
-    bar_h = 22
-    max_ms = max((t.stats()[0] for t in timers), default=0.5)
-    max_ms = max(max_ms, 0.1)
-
-    bar_w_total = W - 2 * PAD
-    col_w = bar_w_total // len(timers)
-
-    for i, timer in enumerate(timers):
-        ms_t, _ = timer.stats()
-        x = PAD + i * col_w
-        c = timer.color if i == active_idx else C_DIM
-        short = KERNEL_NAMES[i].split("\n")[0]
-        sub   = KERNEL_NAMES[i].split("\n")[1]
-
-        _bar(strip, x, bar_y, col_w - 20, bar_h,
-             ms_t / max_ms, timer.color, bg=(35, 35, 35))
-        _txt(strip, f"{ms_t:.3f} ms", (x, bar_y + bar_h + 14),
-             scale=0.36, color=c)
-        _txt(strip, short, (x, bar_y + bar_h + 30), scale=0.30, color=C_DIM)
-
-        if i == active_idx:
-            cv2.rectangle(strip, (x - 2, bar_y - 2),
-                          (x + col_w - 22, bar_y + bar_h + 2), c, 1)
-
-    # speedup annotations
-    ms_vals = [t.stats()[0] for t in timers]
-    if ms_vals[0] > 0:
-        for i in range(1, len(timers)):
-            if ms_vals[i] > 0:
-                su = ms_vals[0] / ms_vals[i]
-                x = PAD + i * col_w
-                _txt(strip, f"{su:.1f}x vs baseline",
-                     (x, bar_y - 14), scale=0.28,
-                     color=C_GREEN if su > 1.1 else C_DIM)
-
-    _txt(strip, f"stress={stress}x  |  [+/-] adjust  |  [1/2/3] switch kernel  |  [Q] quit",
-         (PAD, H - 10), scale=0.28, color=C_DIM)
+def draw_score_overlay(cam_img, score_map, color):
+    if score_map is None:
+        return
+    fh, fw = cam_img.shape[:2]
+    rows, cols = score_map.shape
+    gh, gw = fh // rows, fw // cols
+    for r in range(rows):
+        for c in range(cols):
+            v = float(score_map[r, c])
+            if v > 0.45:
+                x1, y1 = c * gw, r * gh
+                ov = cam_img.copy()
+                cv2.rectangle(ov, (x1, y1),
+                              (x1 + gw, y1 + gh), color, -1)
+                cv2.addWeighted(ov, 0.18 + v * 0.14,
+                                cam_img, 1 - (0.18 + v * 0.14),
+                                0, cam_img)
 
 
-# ── main ──────────────────────────────────────────────────────────────
+# ── main ─────────────────────────────────────────────────────────────
 
 def main():
     if _NUMBA_AVAILABLE:
-        print("Warming up JIT kernel (one-time LLVM compile)...", end=" ", flush=True)
+        print("Warming up JIT...", end=" ", flush=True)
         warmup_jit()
+        # also warm up for PERF_GRID dimensions
+        from cortex.compiler.saliency_kernel import _grid_pool_jit
+        dummy = np.zeros((64, 64), dtype=np.float32)
+        _grid_pool_jit(dummy, PERF_GRID[1], PERF_GRID[0])
         print("done")
     else:
-        print("numba not available — JIT kernel falls back to vectorized")
+        print("numba unavailable — JIT = vectorized")
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         cap = None
         print("No webcam — using synthetic frames.")
 
-    active_idx = 2   # start on JIT
-    stress     = 50
-    frame_ref  = [None]
+    frame_ref     = [None]
+    bench         = SequentialBenchmark(frame_ref)
+    active_overlay = 2          # default: JIT score map
+    synth          = np.zeros((480, 640, 3), dtype=np.uint8)
 
-    # start background timers (all 3 run continuously)
-    timers = [
-        KernelTimer(fn, KERNEL_NAMES[i], KERNEL_COLORS[i], frame_ref)
-        for i, fn in enumerate(KERNEL_FNS)
-    ]
+    PANEL_W  = 380
+    CELL     = 26
+    BOTTOM_H = DISPLAY_GRID[1] * CELL + 50
 
-    score_map  = None
-    active_ms  = 0.0
-    synth      = np.zeros((480, 640, 3), dtype=np.uint8)
-
-    # macOS fullscreen blocks keyboard input — use resizable window instead
     cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(WIN, 1280, 780)
+    cv2.resizeWindow(WIN, 1280, 800)
 
     while True:
         # ── grab frame ───────────────────────────────────────────────
@@ -327,92 +250,73 @@ def main():
 
         frame_ref[0] = frame.copy()
 
-        # ── run active kernel × stress ───────────────────────────────
-        fn = KERNEL_FNS[active_idx]
-        t0 = time.perf_counter()
-        for _ in range(stress):
-            sm = fn(frame, GRID)
-        active_ms = (time.perf_counter() - t0) * 1000
-        score_map = sm
+        fh, fw  = frame.shape[:2]
+        total_w = fw + PANEL_W
+        total_h = fh + BOTTOM_H
+        canvas  = np.full((total_h, total_w, 3), C_BG, dtype=np.uint8)
 
-        # ── layout ───────────────────────────────────────────────────
-        fh, fw = frame.shape[:2]
-        canvas_w = fw + PANEL_W
-        canvas_h = fh + BOTTOM_H
-        canvas = np.full((canvas_h, canvas_w, 3), C_BG, dtype=np.uint8)
+        # camera + score map overlay (always JIT-quality — display grid)
+        cam_img  = frame.copy()
+        score_sm = KERNEL_FNS[active_overlay](frame, DISPLAY_GRID)
+        draw_score_overlay(cam_img, score_sm, KERNEL_COLORS[active_overlay])
 
-        # camera feed + score map overlay
-        cam_img = frame.copy()
-        if score_map is not None:
-            rows, cols = score_map.shape
-            gh, gw = fh // rows, fw // cols
-            for r in range(rows):
-                for c in range(cols):
-                    v = float(score_map[r, c])
-                    if v > 0.45:
-                        x1, y1 = c * gw, r * gh
-                        ov = cam_img.copy()
-                        cv2.rectangle(ov, (x1, y1),
-                                      (x1 + gw, y1 + gh),
-                                      (0, int(v * 220), 0), -1)
-                        cv2.addWeighted(ov, 0.18 + v * 0.15,
-                                        cam_img, 1 - (0.18 + v * 0.15),
-                                        0, cam_img)
-
-        # header bar
-        c_active = KERNEL_COLORS[active_idx]
-        cv2.rectangle(cam_img, (0, 0), (fw, 28), (0, 0, 0), -1)
-        short = KERNEL_NAMES[active_idx].split("\n")[0]
-        _txt(cam_img, f"ACTIVE: {short}",
-             (10, 19), scale=0.50, color=c_active, thick=1)
-        ms_c = C_GREEN if active_ms < 10 else (C_ORANGE if active_ms < 40 else C_RED)
+        # header
+        c_act = KERNEL_COLORS[active_overlay]
+        cv2.rectangle(cam_img, (0, 0), (fw, 30), (0, 0, 0), -1)
         _txt(cam_img,
-             f"stress={stress}x  |  {active_ms:.1f}ms/frame",
-             (fw - 300, 19), scale=0.38, color=ms_c)
-
-        # ── stress overlay — big centred text ────────────────────────
-        # Draw stress number large so user can see it change immediately
-        stress_str = f"x{stress}"
-        ms_c2 = C_GREEN if active_ms < 10 else (C_ORANGE if active_ms < 40 else C_RED)
-        # shadow
-        cv2.putText(cam_img, stress_str,
-                    (fw // 2 - 80, fh // 2 + 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 3.0, (0, 0, 0), 8, cv2.LINE_AA)
-        # foreground
-        cv2.putText(cam_img, stress_str,
-                    (fw // 2 - 80, fh // 2 + 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 3.0, ms_c2, 4, cv2.LINE_AA)
-        _txt(cam_img, "STRESS  [UP] more  [DOWN] less",
-             (fw // 2 - 120, fh // 2 + 65), scale=0.45, color=C_DIM)
+             f"OVERLAY: [{active_overlay+1}] {KERNEL_NAMES[active_overlay]}  —  {KERNEL_SUBS[active_overlay]}",
+             (10, 21), scale=0.46, color=c_act, thick=1)
 
         canvas[:fh, :fw] = cam_img
-        cv2.line(canvas, (fw, 0), (fw, fh), C_BORDER, 1)
 
         # right panel
-        panel = np.full((fh, PANEL_W, 3), C_PANEL, dtype=np.uint8)
-        draw_panel(panel, active_idx, timers, score_map, stress, active_ms)
-        canvas[:fh, fw:fw + PANEL_W] = panel
+        draw_panel(canvas, bench, active_overlay, fw, PANEL_W, fh)
 
-        # bottom strip
-        strip = np.full((BOTTOM_H, canvas_w, 3), (20, 20, 20), dtype=np.uint8)
-        draw_bottom(strip, timers, active_idx, stress)
-        canvas[fh:fh + BOTTOM_H, :] = strip
+        # ── bottom: score maps for all 3 side by side ─────────────────
+        y0   = fh
+        col  = total_w // 3
+        PAD2 = 10
+        cv2.line(canvas, (0, y0), (total_w, y0), C_BORD, 1)
+
+        for i, fn in enumerate(KERNEL_FNS):
+            sm = fn(frame, DISPLAY_GRID)
+            x0 = i * col
+            c  = KERNEL_COLORS[i]
+            nc = C_WHITE if i == active_overlay else C_DIM
+
+            _txt(canvas, f"[{i+1}] {KERNEL_NAMES[i]}",
+                 (x0 + PAD2, y0 + 16), scale=0.38, color=nc)
+
+            rows, cols_ = sm.shape
+            mx, my = x0 + PAD2, y0 + 26
+            for r in range(rows):
+                for c_ in range(cols_):
+                    v  = float(sm[r, c_])
+                    x1 = mx + c_ * CELL
+                    y1 = my + r  * CELL
+                    cv2.rectangle(canvas,
+                                  (x1 + 1, y1 + 1),
+                                  (x1 + CELL - 2, y1 + CELL - 2),
+                                  (int((1 - v) * 50),
+                                   int(v * (230 if i == active_overlay else 100)),
+                                   20), -1)
+            cv2.rectangle(canvas, (mx, my),
+                          (mx + cols_ * CELL, my + rows * CELL),
+                          c if i == active_overlay else C_BORD, 1)
+
+            if i < 2:
+                cv2.line(canvas, (x0 + col, y0 + 4),
+                         (x0 + col, y0 + BOTTOM_H - 4), C_BORD, 1)
 
         cv2.imshow(WIN, canvas)
 
-        raw_key = cv2.waitKey(1)
-        key = raw_key & 0xFF
-        if   key == ord("q"):  break
-        elif key == ord("1"):  active_idx = 0
-        elif key == ord("2"):  active_idx = 1
-        elif key == ord("3"):  active_idx = 2
-        elif key in (ord("+"), ord("="), 82):   # 82 = UP arrow
-            stress = min(stress + 25, 1000)
-        elif key in (ord("-"), 84):             # 84 = DOWN arrow
-            stress = max(stress - 25, 1)
+        key = cv2.waitKey(1) & 0xFF
+        if   key == ord("q"): break
+        elif key == ord("1"): active_overlay = 0
+        elif key == ord("2"): active_overlay = 1
+        elif key == ord("3"): active_overlay = 2
 
-    for t in timers:
-        t.stop()
+    bench.stop()
     if cap is not None:
         cap.release()
     cv2.destroyAllWindows()
