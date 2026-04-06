@@ -35,7 +35,7 @@ while True:
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     if prev_gray is not None:
         diff = cv2.absdiff(gray, prev_gray)
-        motion_val = float(diff.mean()) / 25.0
+        motion_val = float(diff.mean())
     else:
         motion_val = 0.0
     prev_gray = gray.copy()
