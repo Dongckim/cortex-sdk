@@ -1,0 +1,35 @@
+=== cortex Phase 3 — Profiling Report ===
+frames: 100  |  resolution: 640×480
+
+--- Partition ---
+compilable   : center_crop, saliency_dft, motion_map, score_fusion, ema_smooth
+external_call: text_roi_mser
+
+--- Per-node latency (L2 Graph IR) ---
+  center_crop          [compilable]     0.027 ms
+  text_roi_mser        [external_call]  6.786 ms
+  saliency_dft         [compilable]     0.350 ms
+  motion_map           [compilable]     0.794 ms
+  score_fusion         [compilable]     0.010 ms
+  ema_smooth           [compilable]     0.003 ms
+
+--- Saliency DFT kernel variants ---
+  baseline    0.313 ms  (1.0x)   Python loop
+  vectorized  0.167 ms  (1.9x)   numpy reshape+mean
+  jit         0.152 ms  (2.1x)   numba @jit → LLVM
+
+--- Numerical equivalence ---
+  baseline vs vectorized:  max_diff=1.19e-07
+  baseline vs jit:         max_diff=5.96e-08
+
+--- Why score_fusion is NOT the compilation target ---
+  score_fusion operates on a 6×8 = 48-cell grid.
+  numpy handles 48 float32 multiplications in ~1 μs.
+  numba/TVM kernel launch overhead (~5–20 μs) exceeds the work itself.
+  Rule: compile only when computation >> kernel launch cost.
+
+--- Why saliency_dft IS the compilation target ---
+  Operates on a 64×64 float32 array (4096 elements).
+  Contains a Python-level grid loop (48 iterations) as additional overhead.
+  Pure numpy — no cv2 black-box calls in the hot path.
+  is_compilable=True in Graph IR → selected by partition() pass.
