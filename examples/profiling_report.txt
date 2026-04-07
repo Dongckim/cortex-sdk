@@ -6,17 +6,17 @@ compilable   : center_crop, saliency_dft, motion_map, score_fusion, ema_smooth
 external_call: text_roi_mser
 
 --- Per-node latency (L2 Graph IR) ---
-  center_crop          [compilable]     0.027 ms
-  text_roi_mser        [external_call]  6.786 ms
-  saliency_dft         [compilable]     0.350 ms
-  motion_map           [compilable]     0.794 ms
-  score_fusion         [compilable]     0.010 ms
+  center_crop          [compilable]     0.030 ms
+  text_roi_mser        [external_call]  8.109 ms
+  saliency_dft         [compilable]     0.430 ms
+  motion_map           [compilable]     0.946 ms
+  score_fusion         [compilable]     0.011 ms
   ema_smooth           [compilable]     0.003 ms
 
 --- Saliency DFT kernel variants ---
-  baseline    0.313 ms  (1.0x)   Python loop
-  vectorized  0.167 ms  (1.9x)   numpy reshape+mean
-  jit         0.152 ms  (2.1x)   numba @jit → LLVM
+  baseline    0.421 ms  (1.0x)   Python loop
+  vectorized  0.225 ms  (1.9x)   numpy reshape+mean
+  jit         0.185 ms  (2.3x)   numba @jit → LLVM
 
 --- Numerical equivalence ---
   baseline vs vectorized:  max_diff=1.19e-07
