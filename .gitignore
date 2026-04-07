@@ -6,3 +6,7 @@ __pycache__/
 .venv/
 dist/
 build/
+
+# Local-only docs (keep out of commits)
+CLAUDE.md
+CORTEX-Claude-CLI-Workflow.md
