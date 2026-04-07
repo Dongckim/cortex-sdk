@@ -2,9 +2,9 @@
 
 **Camera Optimized Realtime Transmission Exchange**
 
-Battery-aware VLM middleware SDK for wearable devices. Sits between camera source and Vision-Language Model APIs, optimizing images for cost, battery, and latency.
+Battery-aware VLM middleware SDK for wearable devices (e.g., smart glasses). CORTEX sits between a camera source and Vision-Language Model (VLM) APIs, optimizing capture and image payloads for **battery**, **bandwidth/cost**, and **end-to-end latency**.
 
-> [arXiv paper](./cortex-arxiv-v5.pdf)
+> Paper (Apr 2026): [`Dongchan_Kim_2026_cortex_middleware_graph_compiler.pdf`](./Dongchan_Kim_2026_cortex_middleware_graph_compiler.pdf)
 
 ---
 
@@ -41,6 +41,12 @@ Smart Glasses
 │  "What did we see 2 minutes ago?"        │
 └──────────────────────────────────────────┘
 ```
+
+### Design goals
+
+- **Battery-aware by construction**: maximize camera-off time and avoid wasteful frames.
+- **Payload-aware for VLM economics**: reduce resolution/bytes before the API boundary.
+- **Compiler-inspired optimization**: expose L2 as a Graph IR to enable analysis, partitioning, and targeted compilation.
 
 ## Installation
 
@@ -120,20 +126,19 @@ Battery modes adjust all thresholds simultaneously:
 
 ### L2: Image Optimization
 
-**Hybrid ROI Cropping** fuses four score maps on an 8x6 grid:
+**Hybrid ROI Cropping** uses a score-map fusion over an \(8\times6\) grid. In the paper formulation:
 
 ```
-S = wc*Sc + wt*St + ws*Ss_adj + wm*Sm
+S = wc*Sc + wt*St + ws*Ss
 ```
 
 | Map | Source | What it captures |
 |-----|--------|-----------------|
 | Sc | Gaussian center weight | Gaze-center bias |
-| St | MSER text detection | Text regions |
-| Ss | Spectral residual saliency | Visually prominent areas |
-| Sm | Frame-to-frame absdiff | Moving objects |
+| St | Text-aware map | Text regions (external boundary) |
+| Ss | DFT-based saliency map | Visually prominent regions |
 
-Saliency is soft-gated by center weight (`Ss * (0.3 + 0.7*Sc)`) to suppress edge noise while preserving peripheral objects.
+Battery-aware operating modes can disable expensive components in power-constrained settings (AGGRESSIVE / BALANCED / POWER_SAVE).
 
 **Adaptive Encoding** adjusts per network condition:
 
@@ -151,6 +156,31 @@ Unified adapter pattern for Claude, GPT-4o, Gemini, and Ollama with circuit-brea
 ### L4: Context Memory (planned)
 
 Sliding window event store with hierarchical summarization and embedding-based retrieval (~130 tokens overhead).
+
+## Graph IR + Compiler Pipeline (Phase 3)
+
+CORTEX augments the L2 pipeline with a **Graph Intermediate Representation (Graph IR)** and a **profiling-driven compiler pipeline**, inspired by ML compilation stacks (TVM / MLIR / XLA):
+
+- **Graph IR**: programmatic inspection of the L2 pipeline as nodes/edges, enabling compiler-style passes.
+- **Partitioning**: split the graph into **compilable** nodes vs **external_call** boundaries (BYOC-style).
+- **Dead-node elimination**: remove nodes that are provably unused under a given battery/request configuration.
+- **Targeted kernel compilation**: apply Numba JIT to the largest compilable hotspot (paper target: `saliency_dft`).
+
+### Benchmarks
+
+Repro script:
+
+```bash
+python examples/compiler_benchmark.py
+```
+
+What it prints and records:
+
+- Graph IR partitioning (compilable vs external boundary)
+- Per-node profiling at **640×480**, **100 frames**
+- Kernel micro-benchmark (baseline / vectorized / JIT) + numerical equivalence
+
+Latest run output is written to `examples/profiling_report.txt`.
 
 ## Project Structure
 
